@@ -1,0 +1,6 @@
+# Ignore the secret file
+thefile.txt
+
+# Don't ignore these files
+!MegahardAPI.py
+!README.md
