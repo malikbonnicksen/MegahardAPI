@@ -9,34 +9,29 @@ import os
 
 
 class CredentialManager:
+    """Manages encrypted Spotify credentials."""
     def __init__(self, credential_file='credentials.enc', key_file='key.key'):
         self.credential_file = credential_file
         self.key_file = key_file
 
     def get_credentials(self):
-        """Retrieves Spotify credentials, prompting the user if not already stored."""
         if not os.path.exists(self.credential_file) or not os.path.exists(self.key_file):
             return self._prompt_and_save_credentials()
         return self._load_credentials()
 
     def _prompt_and_save_credentials(self):
-        """Prompts the user for Spotify credentials and saves them encrypted."""
         client_id = input("Enter your Spotify Client ID: ").strip()
         client_secret = input("Enter your Spotify Client Secret: ").strip()
 
-        # Generate a Fernet encryption key
         key = Fernet.generate_key()
         cipher = Fernet(key)
 
-        # Save the key to a file
         with open(self.key_file, 'wb') as key_file:
             key_file.write(key)
 
-        # Encrypt credentials
         credentials = f"{client_id}\n{client_secret}".encode()
         encrypted_credentials = cipher.encrypt(credentials)
 
-        # Save encrypted credentials to a file
         with open(self.credential_file, 'wb') as cred_file:
             cred_file.write(encrypted_credentials)
 
@@ -44,7 +39,6 @@ class CredentialManager:
         return client_id, client_secret
 
     def _load_credentials(self):
-        """Loads and decrypts Spotify credentials from the file."""
         with open(self.key_file, 'rb') as key_file:
             key = key_file.read()
         cipher = Fernet(key)
@@ -62,10 +56,11 @@ class SpotifyPlayer:
         self.playlist = []
         self.now_playing = None
         self.started = False
+        self.allowed_genres = set()
+        self.user_history = {}  # Track who added each song
         self.spotify = self._initialize_spotify_client()
 
     def _initialize_spotify_client(self):
-        """Initializes the Spotify client using encrypted credentials."""
         client_id, client_secret = self.credential_manager.get_credentials()
         return spotipy.Spotify(auth_manager=SpotifyOAuth(
             client_id=client_id,
@@ -74,8 +69,8 @@ class SpotifyPlayer:
             scope="user-read-currently-playing user-read-playback-state user-modify-playback-state"
         ))
 
-    def add_to_playlist(self, song):
-        """Adds a song to the playlist and starts playback if not already started."""
+    def add_to_playlist(self, song, user):
+        """Adds a song to the playlist, if genre is allowed."""
         if "-" not in song:
             return "Format: Artist - Songname"
 
@@ -84,16 +79,36 @@ class SpotifyPlayer:
             return "Song not found on Spotify."
 
         track = search_result['tracks']['items'][0]
+        genre = self.get_genre(track)
+
+        if self.allowed_genres and genre not in self.allowed_genres:
+            return f"Genre '{genre}' is not allowed on this server."
+
         if any(item['id'] == track['id'] for item in self.playlist):
             return "Song is already in the playlist."
 
         self.playlist.append(track)
+        self.user_history[track['id']] = {"user": user, "genre": genre}
+
         if not self.started:
             self._start_playback(track)
         return f"{track['name']} by {track['artists'][0]['name']} added to playlist."
 
+    def get_genre(self, track):
+        """Fetches the genre for the track's artist."""
+        artist_id = track['artists'][0]['id']
+        artist_info = self.spotify.artist(artist_id)
+        return artist_info['genres'][0] if artist_info['genres'] else "Unknown"
+
+    def set_allowed_genres(self, genres):
+        """Sets the genres allowed on the server."""
+        self.allowed_genres = set(genres)
+
+    def get_user_history(self):
+        """Returns the history of users and genres."""
+        return self.user_history
+
     def _start_playback(self, track):
-        """Starts playback for the given track."""
         device_id = self._get_device_id()
         if not device_id:
             return "No active Spotify devices found."
@@ -109,12 +124,10 @@ class SpotifyPlayer:
         self._set_timer(track['duration_ms'])
 
     def _set_timer(self, duration_ms):
-        """Starts a timer to play the next song when the current one ends."""
         seconds = duration_ms / 1000
         Timer(seconds, self.play_next).start()
 
     def play_next(self):
-        """Plays the next song in the playlist."""
         if not self.playlist:
             self.started = False
             self.now_playing = None
@@ -125,48 +138,59 @@ class SpotifyPlayer:
         self.playlist.remove(next_track)
 
     def _get_device_id(self):
-        """Returns the ID of the first active device."""
         devices = self.spotify.devices()
         if devices['devices']:
             return devices['devices'][0]['id']
         return None
 
-    def get_playlist(self):
-        """Returns the current playlist in a simplified format."""
-        return [
-            {
-                "Artist": track['artists'][0]['name'],
-                "Song": track['name'],
-                "Duration": f"{track['duration_ms'] // 60000}:{(track['duration_ms'] // 1000) % 60:02}"
-            }
-            for track in self.playlist
-        ]
 
-
-class MegahardAPI:
-    def __init__(self):
-        self.player = SpotifyPlayer(CredentialManager())
+class AdminDashboard:
+    """Handles admin functionality for managing genres and viewing user activity."""
+    def __init__(self, player):
+        self.player = player
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
     def GET(self):
-        """Returns the current playlist."""
-        playlist = self.player.get_playlist()
-        return playlist if playlist else {"message": "Playlist is empty."}
+        """Displays user activity and current allowed genres."""
+        return {
+            "user_history": self.player.get_user_history(),
+            "allowed_genres": list(self.player.allowed_genres)
+        }
+
+    @cherrypy.expose
+    @cherrypy.tools.json_in()
+    def POST(self):
+        """Updates the allowed genres."""
+        input_data = cherrypy.request.json
+        genres = input_data.get('genres', [])
+        self.player.set_allowed_genres(genres)
+        return {"message": f"Allowed genres updated: {genres}"}
+
+
+class MegahardAPI:
+    def __init__(self):
+        credential_manager = CredentialManager()
+        self.player = SpotifyPlayer(credential_manager)
+        self.admin = AdminDashboard(self.player)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def GET(self):
+        return self.player.get_playlist()
 
     @cherrypy.expose
     @cherrypy.tools.json_in()
     def PUT(self):
-        """Adds a song to the playlist."""
         input_data = cherrypy.request.json
-        song = input_data.get('song') if input_data else None
+        song = input_data.get('song')
+        user = input_data.get('user', 'anonymous')
         if not song:
-            return "Error: 'song' field is required."
-        return self.player.add_to_playlist(song)
+            return {"error": "Song is required."}
+        return self.player.add_to_playlist(song, user)
 
 
 if __name__ == '__main__':
-    # Get IP and port dynamically or default to 127.0.0.1:6666
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect(("8.8.8.8", 80))
     ipaddr = s.getsockname()[0]
@@ -178,12 +202,10 @@ if __name__ == '__main__':
         'server.socket_port': portnr,
     })
 
-    config = {
-        '/': {
-            'request.dispatch': cherrypy.dispatch.MethodDispatcher(),
-            'tools.sessions.on': True,
-            'tools.response_headers.on': True,
-            'tools.response_headers.headers': [('Content-Type', 'application/json')],
-        }
+    app_config = {
+        '/': {'tools.sessions.on': True},
+        '/admin': {'request.dispatch': cherrypy.dispatch.MethodDispatcher()}
     }
-    cherrypy.quickstart(MegahardAPI(), '/', config)
+
+    cherrypy.tree.mount(MegahardAPI(), '/', app_config)
+    cherrypy.quickstart()
