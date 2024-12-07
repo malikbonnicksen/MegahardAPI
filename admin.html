@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; }
+        header { background: #333; color: #fff; padding: 1rem 0; text-align: center; }
+        main { padding: 1rem; }
+        .hidden { display: none; }
+        .button { background-color: #007BFF; color: white; border: none; padding: 10px; cursor: pointer; }
+        .button:hover { background-color: #0056b3; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Admin Dashboard</h1>
+    </header>
+    <main>
+        <div id="login-form">
+            <h2>Login</h2>
+            <form onsubmit="login(event)">
+                <label for="username">Username:</label>
+                <input type="text" id="username" required><br>
+                <label for="password">Password:</label>
+                <input type="password" id="password" required><br>
+                <button type="submit" class="button">Login</button>
+            </form>
+        </div>
+
+        <div id="dashboard" class="hidden">
+            <h2>Playlist</h2>
+            <ul id="playlist"></ul>
+
+            <h2>Allowed Genres</h2>
+            <input type="text" id="genre-input" placeholder="Add genres (comma-separated)">
+            <button onclick="updateGenres()" class="button">Update Genres</button>
+            <ul id="allowed-genres"></ul>
+
+            <h2>User Activity</h2>
+            <ul id="user-activity"></ul>
+
+            <button onclick="logout()" class="button">Logout</button>
+        </div>
+    </main>
+
+    <script>
+        async function login(event) {
+            event.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            const response = await fetch('/admin/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+
+            if (response.ok) {
+                document.getElementById('login-form').classList.add('hidden');
+                document.getElementById('dashboard').classList.remove('hidden');
+                loadDashboard();
+            } else {
+                alert("Invalid login credentials.");
+            }
+        }
+
+        async function loadDashboard() {
+            const response = await fetch('/admin');
+            const data = await response.json();
+
+            // Populate playlist
+            const playlistEl = document.getElementById('playlist');
+            playlistEl.innerHTML = '';
+            (data.user_history || []).forEach(item => {
+                const li = document.createElement('li');
+                li.textContent = `${item.user}: ${item.genre}`;
+                playlistEl.appendChild(li);
+            });
+
+            // Populate genres
+            const genresEl = document.getElementById('allowed-genres');
+            genresEl.innerHTML = '';
+            (data.allowed_genres || []).forEach(genre => {
+                const li = document.createElement('li');
+                li.textContent = genre;
+                genresEl.appendChild(li);
+            });
+        }
+
+        async function updateGenres() {
+            const genres = document.getElementById('genre-input').value.split(',');
+            const response = await fetch('/admin', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ genres })
+            });
+
+            if (response.ok) {
+                loadDashboard();
+            } else {
+                alert("Failed to update genres.");
+            }
+        }
+
+        async function logout() {
+            await fetch('/admin/logout');
+            document.getElementById('dashboard').classList.add('hidden');
+            document.getElementById('login-form').classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>
