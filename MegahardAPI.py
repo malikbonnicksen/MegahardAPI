@@ -9,17 +9,28 @@ import os
 
 
 # Credential Manager (unchanged from earlier updates)
+# Credential Manager (opdateret: tjekker først env-vars, så krypteret fil, ellers prompt)
 class CredentialManager:
     def __init__(self, credential_file='credentials.enc', key_file='key.key'):
         self.credential_file = credential_file
         self.key_file = key_file
 
     def get_credentials(self):
-        if not os.path.exists(self.credential_file) or not os.path.exists(self.key_file):
-            return self._prompt_and_save_credentials()
-        return self._load_credentials()
+        # 1) Tjek miljøvariabler først (praktisk til servers/containers)
+        client_id = os.environ.get("SPOTIFY_CLIENT_ID")
+        client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET")
+        if client_id and client_secret:
+            return client_id, client_secret
+
+        # 2) Hvis ikke env-vars, prøv de krypterede filer
+        if os.path.exists(self.credential_file) and os.path.exists(self.key_file):
+            return self._load_credentials()
+
+        # 3) Fald tilbage til prompt som sidste udvej (kun hvis en person kører processen)
+        return self._prompt_and_save_credentials()
 
     def _prompt_and_save_credentials(self):
+        # Prompt kun når en bruger aktivt kører serveren lokalt
         client_id = input("Enter your Spotify Client ID: ").strip()
         client_secret = input("Enter your Spotify Client Secret: ").strip()
         key = Fernet.generate_key()
@@ -50,23 +61,25 @@ class SpotifyPlayer:
         self.now_playing = None
         self.started = False
         self.allowed_genres = set()
-        self.user_history = {}  # Track who added each song
+        self.user_history = {}
         self.spotify = self._initialize_spotify_client()
 
     def _initialize_spotify_client(self):
         client_id, client_secret = self.credential_manager.get_credentials()
-        return spotipy.Spotify(auth_manager=SpotifyOAuth(
+        auth_manager = SpotifyOAuth(
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri="http://127.0.0.1:6666/",
-            scope="user-read-currently-playing user-read-playback-state user-modify-playback-state"
-        ))
+            scope="user-read-currently-playing user-read-playback-state user-modify-playback-state",
+            cache_path=".spotify_token_cache"
+        )
+        return spotipy.Spotify(auth_manager=auth_manager)
 
     def add_to_playlist(self, song, user):
         if "-" not in song:
             return "Format: Artist - Songname"
-        search_result = self.spotify.search(song, limit=1)
-        if not search_result['tracks']['items']:
+        search_result = self.spotify.search(q=song, type='track', limit=1)
+        if not search_result.get('tracks') or not search_result['tracks']['items']:
             return "Song not found on Spotify."
         track = search_result['tracks']['items'][0]
         genre = self.get_genre(track)
@@ -74,16 +87,40 @@ class SpotifyPlayer:
             return f"Genre '{genre}' is not allowed on this server."
         if any(item['id'] == track['id'] for item in self.playlist):
             return "Song is already in the playlist."
+
+        # Add to internal playlist + history
         self.playlist.append(track)
         self.user_history[track['id']] = {"user": user, "genre": genre}
+
+        device_id = self._get_device_id()
+        if not device_id:
+            return "No active Spotify devices found."
+
         if not self.started:
-            self._start_playback(track)
+            # Start playback directly with the track URI (plays only the track)
+            try:
+                self.spotify.start_playback(device_id=device_id, uris=[track['uri']], position_ms=0)
+                self.now_playing = track
+                self.started = True
+            except Exception as e:
+                return f"Failed to start playback: {e}"
+        else:
+            # Add subsequent tracks to Spotify's queue
+            try:
+                self.spotify.add_to_queue(track['uri'], device_id=device_id)
+            except Exception as e:
+                return f"Failed to add to Spotify queue: {e}"
+
         return f"{track['name']} by {track['artists'][0]['name']} added to playlist."
 
     def get_genre(self, track):
-        artist_id = track['artists'][0]['id']
-        artist_info = self.spotify.artist(artist_id)
-        return artist_info['genres'][0] if artist_info['genres'] else "Unknown"
+        try:
+            artist_id = track['artists'][0]['id']
+            artist_info = self.spotify.artist(artist_id)
+            genres = artist_info.get('genres', [])
+            return genres[0] if genres else "Unknown"
+        except Exception:
+            return "Unknown"
 
     def set_allowed_genres(self, genres):
         self.allowed_genres = set(genres)
@@ -93,36 +130,29 @@ class SpotifyPlayer:
 
     def get_playlist(self):
         return [
-            {"Artist": track['artists'][0]['name'], "Song": track['name'], "Duration": track['duration_ms']}
-            for track in self.playlist
+            {"Artist": t['artists'][0]['name'], "Song": t['name'], "Duration": t['duration_ms'], "id": t['id']}
+            for t in self.playlist
         ]
 
-    def _start_playback(self, track):
-        device_id = self._get_device_id()
-        if not device_id:
-            return "No active Spotify devices found."
-        self.spotify.start_playback(
-            device_id=device_id,
-            context_uri=track['album']['uri'],
-            offset={"position": track['track_number'] - 1},
-            position_ms=0
-        )
-        self.now_playing = track
-        self.started = True
-
     def _get_device_id(self):
-        devices = self.spotify.devices()
-        if devices['devices']:
-            return devices['devices'][0]['id']
+        try:
+            devices = self.spotify.devices()
+            if devices and devices.get('devices'):
+                return devices['devices'][0]['id']
+        except Exception:
+            pass
         return None
 
 
 # Admin Dashboard
+# Admin Dashboard (opdateret: hent admin-creds fra env-vars hvis tilgængeligt)
 class AdminDashboard:
     def __init__(self, player):
         self.player = player
-        self.admin_credentials = {"username": "admin", "password": "password"}  # Replace with a secure method.
-        self.sessions = {}
+        # Hent fra env-vars, fallback til default hvis ikke sat (anbefal ikke at bruge default i produktion)
+        admin_user = os.environ.get("ADMIN_USER", "admin")
+        admin_pass = os.environ.get("ADMIN_PASS", "password")
+        self.admin_credentials = {"username": admin_user, "password": admin_pass}
 
     @cherrypy.expose
     def index(self):
@@ -131,37 +161,39 @@ class AdminDashboard:
 
     @cherrypy.expose
     @cherrypy.tools.json_in()
+    @cherrypy.tools.json_out()
     def login(self):
         input_data = cherrypy.request.json
         username = input_data.get("username")
         password = input_data.get("password")
+        # Simpelt check; overvej hashing (bcrypt) hvis du vil være mere sikker
         if username == self.admin_credentials["username"] and password == self.admin_credentials["password"]:
-            session_id = cherrypy.session.id
-            self.sessions[session_id] = True
+            cherrypy.session['logged_in'] = True
             return {"message": "Login successful."}
-        return {"error": "Invalid credentials."}, 401
+        cherrypy.response.status = 401
+        return {"error": "Invalid credentials."}
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
     def logout(self):
-        session_id = cherrypy.session.id
-        self.sessions.pop(session_id, None)
+        cherrypy.session.pop('logged_in', None)
         return {"message": "Logged out successfully."}
+
+    def _require_login(self):
+        if not cherrypy.session.get('logged_in'):
+            raise cherrypy.HTTPError(401, "Unauthorized access.")
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
     def GET(self):
-        session_id = cherrypy.session.id
-        if not self.sessions.get(session_id):
-            raise cherrypy.HTTPError(401, "Unauthorized access.")
+        self._require_login()
         return {"user_history": self.player.get_user_history(), "allowed_genres": list(self.player.allowed_genres)}
 
     @cherrypy.expose
     @cherrypy.tools.json_in()
+    @cherrypy.tools.json_out()
     def POST(self):
-        session_id = cherrypy.session.id
-        if not self.sessions.get(session_id):
-            raise cherrypy.HTTPError(401, "Unauthorized access.")
+        self._require_login()
         input_data = cherrypy.request.json
         genres = input_data.get('genres', [])
         self.player.set_allowed_genres(genres)
@@ -170,9 +202,8 @@ class AdminDashboard:
 
 # Megahard API
 class MegahardAPI:
-    def __init__(self):
-        credential_manager = CredentialManager()
-        self.player = SpotifyPlayer(credential_manager)
+    def __init__(self, player):
+        self.player = player
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
@@ -182,13 +213,17 @@ class MegahardAPI:
 
     @cherrypy.expose
     @cherrypy.tools.json_in()
+    @cherrypy.tools.json_out()
     def PUT(self):
         input_data = cherrypy.request.json
         song = input_data.get('song')
         user = input_data.get('user', 'anonymous')
         if not song:
+            cherrypy.response.status = 400
             return {"error": "Song is required."}
-        return self.player.add_to_playlist(song, user)
+        result = self.player.add_to_playlist(song, user)
+        # result can be message or error string
+        return {"message": result}
 
 
 if __name__ == '__main__':
@@ -201,9 +236,14 @@ if __name__ == '__main__':
     cherrypy.config.update({
         'server.socket_host': ipaddr,
         'server.socket_port': portnr,
+        'tools.sessions.on': True,
+        'tools.sessions.storage_type': 'ram'  # kan ændres til 'file' hvis ønsket
     })
 
-    cherrypy.tree.mount(MegahardAPI(), '/')
-    cherrypy.tree.mount(AdminDashboard(SpotifyPlayer(CredentialManager())), '/admin')
+    credential_manager = CredentialManager()
+    shared_player = SpotifyPlayer(credential_manager)
+
+    cherrypy.tree.mount(MegahardAPI(shared_player), '/')
+    cherrypy.tree.mount(AdminDashboard(shared_player), '/admin')
     cherrypy.engine.start()
     cherrypy.engine.block()
