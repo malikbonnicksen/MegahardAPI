@@ -32,14 +32,10 @@
         <div id="dashboard" class="hidden">
             <h2>Playlist</h2>
             <ul id="playlist"></ul>
-
-            <h2>Allowed Genres</h2>
-            <input type="text" id="genre-input" placeholder="Add genres (comma-separated)">
-            <button onclick="updateGenres()" class="button">Update Genres</button>
-            <ul id="allowed-genres"></ul>
-
+            
             <h2>User Activity</h2>
             <ul id="user-activity"></ul>
+
 
             <button onclick="logout()" class="button">Logout</button>
         </div>
@@ -69,17 +65,17 @@
         async function loadDashboard() {
             const response = await fetch('/admin');
             const data = await response.json();
-
-            // Populate playlist
+        
+            // PLAYLIST
             const playlistEl = document.getElementById('playlist');
             playlistEl.innerHTML = '';
-            (data.user_history || []).forEach(item => {
+            (data.playlist || []).forEach(track => {
                 const li = document.createElement('li');
-                li.textContent = `${item.user}: ${item.genre}`;
+                li.textContent = `${track.Artist} – ${track.Song}`;
                 playlistEl.appendChild(li);
             });
-
-            // Populate genres
+        
+            // ALLOWED GENRES
             const genresEl = document.getElementById('allowed-genres');
             genresEl.innerHTML = '';
             (data.allowed_genres || []).forEach(genre => {
@@ -87,7 +83,17 @@
                 li.textContent = genre;
                 genresEl.appendChild(li);
             });
+        
+            // USER ACTIVITY
+            const userActEl = document.getElementById('user-activity');
+            userActEl.innerHTML = '';
+            Object.entries(data.user_history || {}).forEach(([trackId, info]) => {
+                const li = document.createElement('li');
+                li.textContent = `${info.user} — ${info.genre} (${trackId})`;
+                userActEl.appendChild(li);
+            });
         }
+
 
         async function updateGenres() {
             const genres = document.getElementById('genre-input').value.split(',');
