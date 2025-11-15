@@ -187,7 +187,13 @@ class AdminDashboard:
     @cherrypy.tools.json_out()
     def GET(self):
         self._require_login()
-        return {"user_history": self.player.get_user_history(), "allowed_genres": list(self.player.allowed_genres)}
+
+        return {
+            "playlist": self.player.get_playlist(),
+            "user_history": self.player.get_user_history(),
+            "allowed_genres": list(self.player.allowed_genres)
+        }
+
 
     @cherrypy.expose
     @cherrypy.tools.json_in()
